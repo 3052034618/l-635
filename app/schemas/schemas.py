@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime, date
 
@@ -165,6 +165,21 @@ class BorrowRecordBase(BaseModel):
     purpose: Optional[str] = None
     scheduled_outbound_time: datetime
     scheduled_return_date: date
+
+    @field_validator('scheduled_outbound_time', mode='before')
+    @classmethod
+    def validate_scheduled_outbound_time(cls, v):
+        if v is None:
+            raise ValueError('预约出库时间不能为空，请提供有效的日期时间（格式: YYYY-MM-DDTHH:MM:SS）')
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                raise ValueError('预约出库时间不能为空，请提供有效的日期时间（格式: YYYY-MM-DDTHH:MM:SS）')
+            try:
+                v = datetime.fromisoformat(v.replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                raise ValueError(f'预约出库时间格式错误: "{v}"，请使用标准格式: YYYY-MM-DDTHH:MM:SS')
+        return v
 
 
 class BorrowRecordCreate(BorrowRecordBase):

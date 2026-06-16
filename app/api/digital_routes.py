@@ -7,6 +7,7 @@ from app.schemas.schemas import (
     DigitalTaskCreate, DigitalTaskResponse,
     QualityCheckRequest
 )
+from app.models.digital import TrainingWorkOrder
 from app.models.user import User
 from app.services.digital_service import DigitalService
 from app.utils.auth import get_current_user
@@ -127,3 +128,33 @@ def reassign_task(
     if not success:
         raise HTTPException(status_code=400, detail=message)
     return task
+
+
+@router.get("/training-work-orders")
+def list_training_work_orders(
+    batch_no: Optional[str] = None,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role not in ["admin", "archivist"]:
+        raise HTTPException(status_code=403, detail="权限不足")
+    query = db.query(TrainingWorkOrder)
+    if batch_no:
+        query = query.filter(TrainingWorkOrder.batch_no == batch_no)
+    if status:
+        query = query.filter(TrainingWorkOrder.status == status)
+    orders = query.order_by(TrainingWorkOrder.created_at.desc()).all()
+    return [
+        {
+            "id": o.id,
+            "order_no": o.order_no,
+            "user_id": o.user_id,
+            "batch_no": o.batch_no,
+            "fail_count": o.fail_count,
+            "reason": o.reason,
+            "status": o.status,
+            "created_at": o.created_at.isoformat() if o.created_at else None
+        }
+        for o in orders
+    ]

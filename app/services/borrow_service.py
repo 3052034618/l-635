@@ -182,6 +182,14 @@ class BorrowService:
                 related_id=record.id,
                 related_type="borrow"
             )
+
+            NotificationService.notify_archive_admins(
+                db,
+                f"借阅审批通过: {record.record_no}",
+                f"借阅申请已通过审批，预约出库时间: {record.scheduled_outbound_time.strftime('%Y-%m-%d %H:%M')}",
+                related_id=record.id,
+                related_type="borrow"
+            )
         else:
             record.approval_status = "rejected"
             record.status = "rejected"
@@ -193,6 +201,14 @@ class BorrowService:
                 f"借阅申请被拒绝: {record.record_no}",
                 f"拒绝原因: {rejection_reason or '未说明'}",
                 "borrow",
+                related_id=record.id,
+                related_type="borrow"
+            )
+
+            NotificationService.notify_archive_admins(
+                db,
+                f"借阅审批拒绝: {record.record_no}",
+                f"借阅申请已拒绝。原因: {rejection_reason or '未说明'}",
                 related_id=record.id,
                 related_type="borrow"
             )
@@ -306,6 +322,14 @@ class BorrowService:
                 f"归还逾期，产生罚款",
                 f"逾期{overdue_days}天，罚款金额: ¥{total_amount}",
                 "fine",
+                related_id=record.id,
+                related_type="fine"
+            )
+
+            NotificationService.notify_archive_admins(
+                db,
+                f"逾期罚款已生成: {record.record_no}",
+                f"用户ID:{record.user_id} 逾期{overdue_days}天，罚款金额: ¥{total_amount}",
                 related_id=record.id,
                 related_type="fine"
             )

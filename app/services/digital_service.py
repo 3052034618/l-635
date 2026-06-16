@@ -229,54 +229,71 @@ class DigitalService:
         return True, f"任务已自动重新分配给 {new_user.full_name}"
 
     @staticmethod
+    def _get_batch_fail_count(db: Session, batch_no: str) -> int:
+        if not batch_no:
+            return 0
+        batch_tasks = db.query(DigitalTask).filter(
+            DigitalTask.batch_no == batch_no
+        ).all()
+        total_fails = 0
+        for t in batch_tasks:
+            total_fails += t.consecutive_fail_count
+        return total_fails
+
+    @staticmethod
     def _create_training_work_order_if_needed(
         db: Session,
         task: DigitalTask
     ) -> Optional[TrainingWorkOrder]:
-        if task.consecutive_fail_count < 3 or not task.batch_no or not task.assigned_user_id:
+        if not task.batch_no:
             return None
-        
+
+        batch_fail_total = DigitalService._get_batch_fail_count(db, task.batch_no)
+        if batch_fail_total < 3:
+            return None
+
         existing_order = db.query(TrainingWorkOrder).filter(
-            TrainingWorkOrder.user_id == task.assigned_user_id,
             TrainingWorkOrder.batch_no == task.batch_no,
             TrainingWorkOrder.status.in_(["pending", "in_progress"])
         ).first()
-        
+
         if existing_order:
             return None
-        
+
+        last_failed_user = task.assigned_user_id
+
         order_no = generate_task_code("TWO")
         work_order = TrainingWorkOrder(
             order_no=order_no,
-            user_id=task.assigned_user_id,
+            user_id=last_failed_user,
             batch_no=task.batch_no,
-            fail_count=task.consecutive_fail_count,
-            reason=f"批次{task.batch_no}连续{task.consecutive_fail_count}次质检不合格，请安排相关培训",
+            fail_count=batch_fail_total,
+            reason=f"批次{task.batch_no}累计{batch_fail_total}次质检不合格，请安排相关培训",
             status="pending"
         )
         db.add(work_order)
         db.commit()
         db.refresh(work_order)
-        
+
         NotificationService.notify_archive_admins(
             db,
             f"培训建议工单已自动生成: {order_no}",
-            f"用户ID:{task.assigned_user_id} 在批次{task.batch_no}中连续{task.consecutive_fail_count}次质检不合格，请安排培训。",
+            f"批次{task.batch_no}累计{batch_fail_total}次质检不合格，请安排培训。",
             related_id=work_order.id,
             related_type="training"
         )
-        
-        if task.assigned_user_id:
+
+        if last_failed_user:
             NotificationService.create_notification(
                 db,
-                task.assigned_user_id,
-                f"培训通知: 您的批次任务连续多次不合格",
-                f"批次{task.batch_no}已连续{task.consecutive_fail_count}次质检不合格，系统已生成培训建议工单，请配合参加培训提升技能。",
+                last_failed_user,
+                f"培训通知: 您的批次任务累计多次不合格",
+                f"批次{task.batch_no}已累计{batch_fail_total}次质检不合格，系统已生成培训建议工单，请配合参加培训提升技能。",
                 "training",
                 related_id=work_order.id,
                 related_type="training"
             )
-        
+
         return work_order
 
     @staticmethod

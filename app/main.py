@@ -1,6 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 
@@ -41,6 +42,21 @@ app.include_router(monitoring_router, prefix="/api")
 app.include_router(appraisal_router, prefix="/api")
 app.include_router(report_router, prefix="/api")
 app.include_router(notification_router, prefix="/api")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = []
+    for err in exc.errors():
+        loc = ".".join(str(l) for l in err.get("loc", []))
+        ctx = err.get("ctx", {})
+        if ctx and "error" in ctx:
+            detail = str(ctx["error"])
+        else:
+            detail = err.get("msg", "")
+        input_val = err.get("input", "")
+        errors.append({"field": loc, "detail": detail, "input": str(input_val)[:100]})
+    return JSONResponse(status_code=422, content={"success": False, "detail": "请求参数校验失败", "errors": errors})
 
 
 @app.exception_handler(Exception)
