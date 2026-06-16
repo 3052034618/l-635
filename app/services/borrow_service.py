@@ -1,5 +1,5 @@
 from typing import Optional, List, Tuple
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.models.borrow import BorrowRecord, OutboundTask, Fine
@@ -8,6 +8,12 @@ from app.models.user import User
 from app.config import settings
 from app.utils.helpers import generate_task_code
 from app.services.notification_service import NotificationService
+
+
+def _to_naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 class BorrowService:
@@ -38,6 +44,31 @@ class BorrowService:
         return True, "权限校验通过"
 
     @staticmethod
+    def validate_scheduled_time(
+        scheduled_outbound_time: datetime,
+        scheduled_return_date: date
+    ) -> Tuple[bool, str]:
+        now = datetime.utcnow()
+        
+        if scheduled_outbound_time is None:
+            return False, "预约出库时间不能为空"
+        
+        scheduled_naive = _to_naive_utc(scheduled_outbound_time)
+        
+        if scheduled_naive <= now:
+            return False, f"预约出库时间已过期，请选择未来的时间（当前服务器时间: {now.strftime('%Y-%m-%d %H:%M')}）"
+        
+        outbound_date = scheduled_naive.date()
+        if outbound_date >= scheduled_return_date:
+            return False, "预约出库时间不能晚于或等于归还日期"
+        
+        max_borrow_days = 90
+        if (scheduled_return_date - outbound_date).days > max_borrow_days:
+            return False, f"借阅期限过长，最长借阅时间为{max_borrow_days}天"
+        
+        return True, "预约时间校验通过"
+
+    @staticmethod
     def calculate_fine(overdue_days: int) -> Tuple[int, float, float]:
         if overdue_days <= 0:
             return 1, 0.0, 0.0
@@ -66,6 +97,21 @@ class BorrowService:
         if not is_permitted:
             return False, message, None
         
+        scheduled_outbound_time = borrow_data.get("scheduled_outbound_time")
+        scheduled_return_date = borrow_data.get("scheduled_return_date")
+        
+        if isinstance(scheduled_outbound_time, str):
+            try:
+                scheduled_outbound_time = datetime.fromisoformat(scheduled_outbound_time.replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                return False, "预约出库时间格式错误，请使用标准格式: YYYY-MM-DDTHH:MM:SS", None
+        
+        is_valid, time_msg = BorrowService.validate_scheduled_time(scheduled_outbound_time, scheduled_return_date)
+        if not is_valid:
+            return False, time_msg, None
+        
+        scheduled_outbound_naive = _to_naive_utc(scheduled_outbound_time)
+        
         record_no = generate_task_code("BR")
         
         borrow_record = BorrowRecord(
@@ -74,7 +120,8 @@ class BorrowService:
             archive_id=archive_id,
             borrow_type=borrow_data.get("borrow_type", "physical"),
             purpose=borrow_data.get("purpose"),
-            scheduled_return_date=borrow_data.get("scheduled_return_date"),
+            scheduled_outbound_time=scheduled_outbound_naive,
+            scheduled_return_date=scheduled_return_date,
             status="pending",
             approval_status="pending"
         )
@@ -85,7 +132,7 @@ class BorrowService:
         NotificationService.notify_archive_admins(
             db,
             f"借阅申请待审批: {borrow_record.record_no}",
-            f"用户申请借阅档案，请及时审批",
+            f"用户申请借阅档案，预约出库时间: {scheduled_outbound_naive.strftime('%Y-%m-%d %H:%M')}，请及时审批",
             related_id=borrow_record.id,
             related_type="borrow"
         )
@@ -107,6 +154,11 @@ class BorrowService:
         if record.approval_status != "pending":
             return False, "该借阅申请已处理", None
         
+        if approve:
+            now = datetime.utcnow()
+            if record.scheduled_outbound_time <= now:
+                return False, f"预约出库时间已过期（{record.scheduled_outbound_time.strftime('%Y-%m-%d %H:%M')}），无法审批通过，请拒绝后让用户重新申请", None
+        
         record.approved_by = admin_id
         record.approval_time = datetime.utcnow()
         
@@ -125,7 +177,7 @@ class BorrowService:
                 db,
                 record.user_id,
                 f"借阅申请已通过: {record.record_no}",
-                "您的借阅申请已审批通过，等待出库",
+                f"您的借阅申请已审批通过，预约出库时间: {record.scheduled_outbound_time.strftime('%Y-%m-%d %H:%M')}，请按时取件",
                 "borrow",
                 related_id=record.id,
                 related_type="borrow"
@@ -151,13 +203,24 @@ class BorrowService:
 
     @staticmethod
     def create_outbound_task(db: Session, borrow_record: BorrowRecord) -> OutboundTask:
-        admin_user = db.query(User).filter(
+        active_admins = db.query(User).filter(
             User.role.in_(["admin", "archivist"]),
             User.is_active == True
-        ).first()
+        ).all()
+        
+        admin_user = None
+        min_tasks = float('inf')
+        for u in active_admins:
+            pending_tasks = db.query(OutboundTask).filter(
+                OutboundTask.admin_user_id == u.id,
+                OutboundTask.status == "pending"
+            ).count()
+            if pending_tasks < min_tasks:
+                min_tasks = pending_tasks
+                admin_user = u
         
         task_no = generate_task_code("OT")
-        scheduled_time = borrow_record.borrow_date + timedelta(hours=2)
+        scheduled_time = borrow_record.scheduled_outbound_time
         
         outbound_task = OutboundTask(
             task_no=task_no,
@@ -176,7 +239,7 @@ class BorrowService:
                 db,
                 admin_user.id,
                 f"出库任务待处理: {task_no}",
-                f"请按时完成档案出库，预约时间: {scheduled_time}",
+                f"请按时完成档案出库，预约出库时间: {scheduled_time.strftime('%Y-%m-%d %H:%M')}",
                 "outbound",
                 related_id=outbound_task.id,
                 related_type="outbound"

@@ -19,6 +19,109 @@ from app.utils.auth import get_current_user
 router = APIRouter(prefix="/archives", tags=["档案管理"])
 
 
+@router.post("/categories", response_model=ArchiveCategoryResponse)
+def create_category(
+    category_data: ArchiveCategoryCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    category = ArchiveCategory(**category_data.model_dump())
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+@router.get("/categories", response_model=list[ArchiveCategoryResponse])
+def list_categories(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    return db.query(ArchiveCategory).all()
+
+
+@router.get("/categories/{category_id}", response_model=ArchiveCategoryResponse)
+def get_category(
+    category_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    category = db.query(ArchiveCategory).filter(ArchiveCategory.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="分类不存在")
+    return category
+
+
+@router.post("/zones", response_model=StorageZoneResponse)
+def create_zone(
+    zone_data: StorageZoneCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    zone = StorageZone(**zone_data.model_dump())
+    db.add(zone)
+    db.commit()
+    db.refresh(zone)
+    return zone
+
+
+@router.get("/zones", response_model=list[StorageZoneResponse])
+def list_zones(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    return db.query(StorageZone).all()
+
+
+@router.get("/zones/{zone_id}", response_model=StorageZoneResponse)
+def get_zone(
+    zone_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    zone = db.query(StorageZone).filter(StorageZone.id == zone_id).first()
+    if not zone:
+        raise HTTPException(status_code=404, detail="库区不存在")
+    return zone
+
+
+@router.post("/cabinets", response_model=StorageCabinetResponse)
+def create_cabinet(
+    cabinet_data: StorageCabinetCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    cabinet = StorageCabinet(**cabinet_data.model_dump())
+    db.add(cabinet)
+    db.commit()
+    db.refresh(cabinet)
+    return cabinet
+
+
+@router.get("/cabinets", response_model=list[StorageCabinetResponse])
+def list_cabinets(
+    zone_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(StorageCabinet)
+    if zone_id:
+        query = query.filter(StorageCabinet.zone_id == zone_id)
+    return query.all()
+
+
+@router.get("/cabinets/{cabinet_id}", response_model=StorageCabinetResponse)
+def get_cabinet(
+    cabinet_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    cabinet = db.query(StorageCabinet).filter(StorageCabinet.id == cabinet_id).first()
+    if not cabinet:
+        raise HTTPException(status_code=404, detail="柜位不存在")
+    return cabinet
+
+
 @router.post("/", response_model=ArchiveResponse)
 def create_archive(
     archive_data: ArchiveCreate,
@@ -77,70 +180,3 @@ def get_archive(
     if not archive:
         raise HTTPException(status_code=404, detail="档案不存在")
     return archive
-
-
-@router.post("/categories", response_model=ArchiveCategoryResponse)
-def create_category(
-    category_data: ArchiveCategoryCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    category = ArchiveCategory(**category_data.model_dump())
-    db.add(category)
-    db.commit()
-    db.refresh(category)
-    return category
-
-
-@router.get("/categories", response_model=list[ArchiveCategoryResponse])
-def list_categories(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    return db.query(ArchiveCategory).all()
-
-
-@router.post("/zones", response_model=StorageZoneResponse)
-def create_zone(
-    zone_data: StorageZoneCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    zone = StorageZone(**zone_data.model_dump())
-    db.add(zone)
-    db.commit()
-    db.refresh(zone)
-    return zone
-
-
-@router.get("/zones", response_model=list[StorageZoneResponse])
-def list_zones(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    return db.query(StorageZone).all()
-
-
-@router.post("/cabinets", response_model=StorageCabinetResponse)
-def create_cabinet(
-    cabinet_data: StorageCabinetCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    cabinet = StorageCabinet(**cabinet_data.model_dump())
-    db.add(cabinet)
-    db.commit()
-    db.refresh(cabinet)
-    return cabinet
-
-
-@router.get("/cabinets", response_model=list[StorageCabinetResponse])
-def list_cabinets(
-    zone_id: Optional[int] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    query = db.query(StorageCabinet)
-    if zone_id:
-        query = query.filter(StorageCabinet.zone_id == zone_id)
-    return query.all()

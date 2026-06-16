@@ -163,6 +163,7 @@ class BorrowRecordBase(BaseModel):
     archive_id: int
     borrow_type: str = "physical"
     purpose: Optional[str] = None
+    scheduled_outbound_time: datetime
     scheduled_return_date: date
 
 

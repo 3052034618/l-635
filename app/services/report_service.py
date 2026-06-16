@@ -1,127 +1,152 @@
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from datetime import datetime, date
 from io import BytesIO
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
+from sqlalchemy import and_
 
-from app.models.report import MonthlyReport, OperationLog
+from app.models.report import MonthlyReport
 from app.models.archive import Archive
+from app.models.archive_category import ArchiveCategory
 from app.models.borrow import BorrowRecord
 from app.models.digital import DigitalTask
-from app.models.monitoring import SensorReading, WorkOrder
+from app.models.monitoring import SensorReading, WorkOrder, Sensor
 from app.models.storage import StorageZone, StorageCabinet
+from app.models.user import User
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, PatternFill
 
 
 class ReportService:
     @staticmethod
-    def generate_monthly_report(db: Session, report_month: Optional[str] = None) -> List[MonthlyReport]:
+    def _is_date_in_range(
+        dt_value: Optional[datetime],
+        start_date: Optional[date],
+        end_date: Optional[date]
+    ) -> bool:
+        if not dt_value:
+            return False
+        d = dt_value.date() if isinstance(dt_value, datetime) else dt_value
+        if start_date and d < start_date:
+            return False
+        if end_date and d > end_date:
+            return False
+        return True
+
+    @staticmethod
+    def _in_month(dt_value: Optional[datetime], year: int, month: int) -> bool:
+        if not dt_value:
+            return False
+        d = dt_value.date() if isinstance(dt_value, datetime) else dt_value
+        return d.year == year and d.month == month
+
+    @staticmethod
+    def generate_monthly_report(
+        db: Session,
+        report_month: Optional[str] = None
+    ) -> List[MonthlyReport]:
         if report_month is None:
             today = date.today()
-            report_month = f"{today.year}-{str(today.month).zfill(2)}"
-        
-        year, month = map(int, report_month.split("-"))
-        start_date = date(year, month, 1)
-        if month == 12:
-            end_date = date(year + 1, 1, 1)
+            year, month = today.year, today.month
         else:
-            end_date = date(year, month + 1, 1)
+            parts = report_month.split("-")
+            year, month = int(parts[0]), int(parts[1])
+        report_month_str = f"{year}-{str(month).zfill(2)}"
         
         zones = db.query(StorageZone).all()
+        if not zones:
+            return []
+        
         reports = []
         
         for zone in zones:
             cabinets = db.query(StorageCabinet).filter(StorageCabinet.zone_id == zone.id).all()
             cabinet_ids = [c.id for c in cabinets]
             
-            new_archives = db.query(Archive).filter(
-                Archive.cabinet_id.in_(cabinet_ids),
-                func.date(Archive.created_at) >= start_date,
-                func.date(Archive.created_at) < end_date
-            ).count()
+            new_archives_count = 0
+            all_archives = db.query(Archive).filter(Archive.cabinet_id.in_(cabinet_ids)).all() if cabinet_ids else []
+            for a in all_archives:
+                if ReportService._in_month(a.created_at, year, month):
+                    new_archives_count += 1
             
-            borrow_count = db.query(BorrowRecord).filter(
-                BorrowRecord.archive_id.in_(
-                    db.query(Archive.id).filter(Archive.cabinet_id.in_(cabinet_ids))
-                ),
-                func.date(BorrowRecord.borrow_date) >= start_date,
-                func.date(BorrowRecord.borrow_date) < end_date
-            ).count()
+            borrow_count = 0
+            if cabinet_ids:
+                archive_ids_subq = [a.id for a in all_archives]
+                all_borrows = db.query(BorrowRecord).filter(
+                    BorrowRecord.archive_id.in_(archive_ids_subq)
+                ).all() if archive_ids_subq else []
+                for b in all_borrows:
+                    if ReportService._in_month(b.borrow_date, year, month):
+                        borrow_count += 1
             
-            digitization_count = db.query(DigitalTask).filter(
-                DigitalTask.status == "completed",
-                DigitalTask.archive_id.in_(
-                    db.query(Archive.id).filter(Archive.cabinet_id.in_(cabinet_ids))
-                ),
-                func.date(DigitalTask.completed_at) >= start_date,
-                func.date(DigitalTask.completed_at) < end_date
-            ).count()
+            digitization_count = 0
+            if cabinet_ids:
+                all_digital_tasks = db.query(DigitalTask).filter(
+                    DigitalTask.status == "completed",
+                    DigitalTask.archive_id.in_([a.id for a in all_archives])
+                ).all() if all_archives else []
+                for t in all_digital_tasks:
+                    if ReportService._in_month(t.completed_at, year, month):
+                        digitization_count += 1
             
-            total_archives_in_zone = db.query(Archive).filter(
-                Archive.cabinet_id.in_(cabinet_ids)
-            ).count()
-            digitized_count = db.query(Archive).filter(
-                Archive.cabinet_id.in_(cabinet_ids),
-                Archive.is_digitized == True
-            ).count()
-            digitization_rate = (digitized_count / total_archives_in_zone * 100) if total_archives_in_zone > 0 else 0.0
+            total_archives_in_zone = len(all_archives)
+            digitized_count = sum(1 for a in all_archives if a.is_digitized)
+            digitization_rate = round((digitized_count / total_archives_in_zone * 100), 2) if total_archives_in_zone > 0 else 0.0
             
-            sensor_ids = db.query(Sensor.id).filter(Sensor.zone_id == zone.id).subquery()
-            temp_warnings = db.query(SensorReading).filter(
-                SensorReading.sensor_id.in_(sensor_ids),
-                SensorReading.is_warning == True,
-                SensorReading.temperature != None,
-                func.date(SensorReading.reading_time) >= start_date,
-                func.date(SensorReading.reading_time) < end_date
-            ).count()
+            sensors = db.query(Sensor).filter(Sensor.zone_id == zone.id).all()
+            sensor_ids = [s.id for s in sensors]
             
-            humidity_warnings = db.query(SensorReading).filter(
-                SensorReading.sensor_id.in_(sensor_ids),
-                SensorReading.is_warning == True,
-                SensorReading.humidity != None,
-                func.date(SensorReading.reading_time) >= start_date,
-                func.date(SensorReading.reading_time) < end_date
-            ).count()
+            temp_warning_count = 0
+            humidity_warning_count = 0
+            if sensor_ids:
+                readings = db.query(SensorReading).filter(SensorReading.sensor_id.in_(sensor_ids)).all()
+                for r in readings:
+                    if not ReportService._in_month(r.reading_time, year, month):
+                        continue
+                    if r.is_warning:
+                        if r.temperature is not None:
+                            if r.temperature < zone.temperature_min or r.temperature > zone.temperature_max:
+                                temp_warning_count += 1
+                        if r.humidity is not None:
+                            if r.humidity < zone.humidity_min or r.humidity > zone.humidity_max:
+                                humidity_warning_count += 1
             
-            total_warnings = db.query(WorkOrder).filter(
-                WorkOrder.zone_id == zone.id,
-                func.date(WorkOrder.created_at) >= start_date,
-                func.date(WorkOrder.created_at) < end_date
-            ).count()
+            all_work_orders = db.query(WorkOrder).filter(WorkOrder.zone_id == zone.id).all()
+            total_warning_count = sum(1 for w in all_work_orders if ReportService._in_month(w.created_at, year, month))
             
             existing = db.query(MonthlyReport).filter(
-                MonthlyReport.report_month == report_month,
+                MonthlyReport.report_month == report_month_str,
                 MonthlyReport.zone_code == zone.code
             ).first()
             
             if existing:
-                existing.new_archives_count = new_archives
+                existing.new_archives_count = new_archives_count
                 existing.borrow_count = borrow_count
                 existing.digitization_count = digitization_count
-                existing.digitization_rate = round(digitization_rate, 2)
-                existing.temp_warning_count = temp_warnings
-                existing.humidity_warning_count = humidity_warnings
-                existing.total_warning_count = total_warnings
+                existing.digitization_rate = digitization_rate
+                existing.temp_warning_count = temp_warning_count
+                existing.humidity_warning_count = humidity_warning_count
+                existing.total_warning_count = total_warning_count
                 existing.generated_at = datetime.utcnow()
                 report = existing
             else:
                 report = MonthlyReport(
-                    report_month=report_month,
+                    report_month=report_month_str,
                     zone_code=zone.code,
-                    new_archives_count=new_archives,
+                    new_archives_count=new_archives_count,
                     borrow_count=borrow_count,
                     digitization_count=digitization_count,
-                    digitization_rate=round(digitization_rate, 2),
-                    temp_warning_count=temp_warnings,
-                    humidity_warning_count=humidity_warnings,
-                    total_warning_count=total_warnings
+                    digitization_rate=digitization_rate,
+                    temp_warning_count=temp_warning_count,
+                    humidity_warning_count=humidity_warning_count,
+                    total_warning_count=total_warning_count
                 )
                 db.add(report)
             
             reports.append(report)
         
         db.commit()
+        for r in reports:
+            db.refresh(r)
         return reports
 
     @staticmethod
@@ -135,7 +160,7 @@ class ReportService:
             query = query.filter(MonthlyReport.report_month == report_month)
         if zone_code:
             query = query.filter(MonthlyReport.zone_code == zone_code)
-        return query.order_by(MonthlyReport.report_month.desc()).all()
+        return query.order_by(MonthlyReport.report_month.desc(), MonthlyReport.zone_code).all()
 
     @staticmethod
     def export_report_to_excel(
@@ -146,64 +171,201 @@ class ReportService:
         fonds_code: Optional[str] = None
     ) -> BytesIO:
         wb = Workbook()
+        header_fill = PatternFill(start_color="FFD9E1F2", end_color="FFD9E1F2", fill_type="solid")
+        header_font = Font(bold=True, color="FF1F3864")
+        center = Alignment(horizontal="center", vertical="center")
         
         ws1 = wb.active
         ws1.title = "运营总览"
-        headers = ["库区", "新增归档量", "借阅次数", "数字化数量", "数字化转化率(%)", "温度超标次数", "湿度超标次数", "总预警次数"]
-        ws1.append(headers)
-        for cell in ws1[1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center")
+        headers1 = ["库区代码", "库区名称", "新增归档量", "借阅次数", "数字化数量", "数字化转化率(%)", "温度超标次数", "湿度超标次数", "总预警次数"]
+        ws1.append(headers1)
+        for col in range(1, len(headers1) + 1):
+            cell = ws1.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+        
+        zones_query = db.query(StorageZone)
+        if zone_code:
+            zones_query = zones_query.filter(StorageZone.code == zone_code)
+        zones = zones_query.all()
         
         reports = ReportService.get_monthly_reports(db, None, zone_code)
-        for r in reports:
-            ws1.append([
-                r.zone_code, r.new_archives_count, r.borrow_count,
-                r.digitization_count, r.digitization_rate,
-                r.temp_warning_count, r.humidity_warning_count, r.total_warning_count
-            ])
+        zone_report_map = {r.zone_code: r for r in reports}
+        
+        for zone in zones:
+            report = zone_report_map.get(zone.code)
+            if report:
+                ws1.append([
+                    zone.code, zone.name,
+                    report.new_archives_count, report.borrow_count,
+                    report.digitization_count, report.digitization_rate,
+                    report.temp_warning_count, report.humidity_warning_count,
+                    report.total_warning_count
+                ])
+            else:
+                ws1.append([zone.code, zone.name, 0, 0, 0, 0.0, 0, 0, 0])
+        
+        for col in ws1.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws1.column_dimensions[column].width = min(max_length + 4, 30)
         
         ws2 = wb.create_sheet("档案明细")
-        ws2.append(["索引号", "题名", "全宗号", "载体类型", "密级", "是否数字化", "入库日期", "状态"])
-        for cell in ws2[1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center")
+        headers2 = ["索引号", "题名", "全宗号", "分类", "载体类型", "密级", "是否数字化", "数字化质量(%)", "入库日期", "状态", "所在库区", "所在柜位"]
+        ws2.append(headers2)
+        for col in range(1, len(headers2) + 1):
+            cell = ws2.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
         
         archive_query = db.query(Archive)
         if fonds_code:
             archive_query = archive_query.filter(Archive.fonds_code == fonds_code)
-        if start_date:
-            archive_query = archive_query.filter(func.date(Archive.created_at) >= start_date)
-        if end_date:
-            archive_query = archive_query.filter(func.date(Archive.created_at) <= end_date)
         
-        for a in archive_query.all():
+        cabinets = db.query(StorageCabinet).all()
+        cabinet_map = {c.id: c for c in cabinets}
+        zones_map = {z.id: z for z in zones}
+        categories = db.query(ArchiveCategory).all()
+        cat_map = {c.id: c for c in categories}
+        
+        archives = archive_query.all()
+        filtered_archives = []
+        for a in archives:
+            if not ReportService._is_date_in_range(a.created_at, start_date, end_date):
+                continue
+            filtered_archives.append(a)
+        
+        for a in filtered_archives:
+            cat = cat_map.get(a.category_id)
+            cab = cabinet_map.get(a.cabinet_id)
+            zone = zones_map.get(cab.zone_id) if cab else None
             ws2.append([
-                a.archive_index, a.title, a.fonds_code, a.carrier_type,
-                a.security_level, "是" if a.is_digitized else "否",
-                str(a.storage_start_date), a.status
+                a.archive_index, a.title, a.fonds_code or "-",
+                cat.name if cat else "-", a.carrier_type, a.security_level,
+                "是" if a.is_digitized else "否",
+                round(a.digitization_quality, 2),
+                str(a.storage_start_date) if a.storage_start_date else "-",
+                a.status, zone.name if zone else "-",
+                a.cabinet_slot or "-"
             ])
+        
+        for col in ws2.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws2.column_dimensions[column].width = min(max_length + 4, 50)
         
         ws3 = wb.create_sheet("借阅记录")
-        ws3.append(["借阅编号", "档案索引号", "申请人", "借阅日期", "应还日期", "实还日期", "状态", "逾期天数", "罚款金额"])
-        for cell in ws3[1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center")
+        headers3 = ["借阅编号", "档案索引号", "用户ID", "用户部门", "预约出库时间", "应还日期", "实还日期", "状态", "审批状态", "逾期天数", "罚款金额(元)"]
+        ws3.append(headers3)
+        for col in range(1, len(headers3) + 1):
+            cell = ws3.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+        
+        users = db.query(User).all()
+        user_map = {u.id: u for u in users}
         
         borrow_query = db.query(BorrowRecord)
-        if start_date:
-            borrow_query = borrow_query.filter(func.date(BorrowRecord.borrow_date) >= start_date)
-        if end_date:
-            borrow_query = borrow_query.filter(func.date(BorrowRecord.borrow_date) <= end_date)
+        borrows = borrow_query.all()
+        filtered_borrows = []
+        for b in borrows:
+            if not ReportService._is_date_in_range(b.borrow_date, start_date, end_date):
+                continue
+            filtered_borrows.append(b)
         
-        for br in borrow_query.all():
-            archive = db.query(Archive).filter(Archive.id == br.archive_id).first()
+        archive_map = {a.id: a for a in archives}
+        for br in filtered_borrows:
+            archive = archive_map.get(br.archive_id)
+            user = user_map.get(br.user_id)
             ws3.append([
-                br.record_no, archive.archive_index if archive else "",
-                br.user_id, str(br.borrow_date), str(br.scheduled_return_date),
-                str(br.actual_return_date) if br.actual_return_date else "",
-                br.status, br.overdue_days, br.fine_amount
+                br.record_no,
+                archive.archive_index if archive else "-",
+                br.user_id,
+                user.department if user else "-",
+                br.scheduled_outbound_time.strftime("%Y-%m-%d %H:%M") if br.scheduled_outbound_time else "-",
+                str(br.scheduled_return_date),
+                str(br.actual_return_date) if br.actual_return_date else "-",
+                br.status, br.approval_status,
+                br.overdue_days, br.fine_amount
             ])
+        
+        for col in ws3.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws3.column_dimensions[column].width = min(max_length + 4, 30)
+        
+        ws4 = wb.create_sheet("温湿度记录")
+        headers4 = ["记录时间", "库区", "传感器", "温度(°C)", "湿度(%)", "是否超标预警"]
+        ws4.append(headers4)
+        for col in range(1, len(headers4) + 1):
+            cell = ws4.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+        
+        sensor_list = db.query(Sensor).all()
+        sensor_map = {s.id: s for s in sensor_list}
+        readings = db.query(SensorReading).order_by(SensorReading.reading_time.desc()).limit(1000).all()
+        
+        filtered_readings = []
+        for r in readings:
+            if not ReportService._is_date_in_range(r.reading_time, start_date, end_date):
+                continue
+            filtered_readings.append(r)
+        
+        for r in filtered_readings[:500]:
+            sensor = sensor_map.get(r.sensor_id)
+            zone = zones_map.get(sensor.zone_id) if sensor else None
+            ws4.append([
+                r.reading_time.strftime("%Y-%m-%d %H:%M:%S"),
+                zone.name if zone else "-",
+                sensor.name if sensor else "-",
+                round(r.temperature, 2) if r.temperature is not None else "-",
+                round(r.humidity, 2) if r.humidity is not None else "-",
+                "是" if r.is_warning else "否"
+            ])
+        
+        for col in ws4.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws4.column_dimensions[column].width = min(max_length + 4, 25)
+        
+        info_row = len(filtered_archives) + len(filtered_borrows) + 10
+        ws1.cell(row=30, column=1, value="导出时间:").font = Font(bold=True)
+        ws1.cell(row=30, column=2, value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        ws1.cell(row=31, column=1, value="统计范围:").font = Font(bold=True)
+        ws1.cell(row=31, column=2, value=f"{start_date or '不限'} 至 {end_date or '不限'}")
+        ws1.cell(row=32, column=1, value="全宗号筛选:").font = Font(bold=True)
+        ws1.cell(row=32, column=2, value=fonds_code or "全部")
+        ws1.cell(row=33, column=1, value="库区筛选:").font = Font(bold=True)
+        ws1.cell(row=33, column=2, value=zone_code or "全部")
         
         output = BytesIO()
         wb.save(output)
@@ -220,6 +382,7 @@ class ReportService:
         description: str,
         ip_address: Optional[str] = None
     ):
+        from app.models.report import OperationLog
         log = OperationLog(
             user_id=user_id,
             operation_type=operation_type,

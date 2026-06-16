@@ -15,6 +15,7 @@ class BorrowRecord(Base):
     borrow_type = Column(String(20), default="physical")
     purpose = Column(String(500))
     borrow_date = Column(DateTime, default=datetime.utcnow)
+    scheduled_outbound_time = Column(DateTime, nullable=False)
     scheduled_return_date = Column(Date, nullable=False)
     actual_return_date = Column(Date)
     status = Column(String(20), default="pending")
